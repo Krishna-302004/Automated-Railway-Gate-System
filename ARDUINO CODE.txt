@@ -1,0 +1,229 @@
+ARDUINO CODE:
+
+#include <Arduino.h>
+#include <ESP32Servo.h>
+
+// Pin definitions
+#define PIEZO_PIN 34
+#define IR_PIN 35        // Changed from PIR_PIN to IR_PIN
+#define BUZZER_PIN 26
+#define SERVO_PIN 25
+
+// Thresholds and timings
+#define VIB_THRESHOLD 200
+#define SPIKE_THRESHOLD 50
+#define MIN_SPIKE_COUNT 3
+#define BUZZ_DURATION 10000
+#define BUZZ_FREQ 2000
+#define SERVO_OPEN_ANGLE 0
+#define SERVO_CLOSE_ANGLE 90
+#define DEBUG_MODE true
+
+Servo gateServo;
+
+// State machine variables
+enum SystemState {
+  WAITING_FOR_TRAIN,
+  BUZZER_ACTIVE,
+  GATE_CLOSED,
+  WAITING_FOR_NO_TRAIN,
+  GATE_OPENING
+};
+
+SystemState currentState = WAITING_FOR_TRAIN;
+unsigned long buzzStartTime = 0;
+int lastSensorValue = 0;
+int spikeCount = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  pinMode(PIEZO_PIN, INPUT);
+  pinMode(IR_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  gateServo.attach(SERVO_PIN, 500, 2400);
+  gateServo.write(SERVO_OPEN_ANGLE);
+  delay(1000);
+
+  lastSensorValue = analogRead(PIEZO_PIN);
+  
+  Serial.println("==========================================");
+  Serial.println("  Railway Gate Automation System");
+  Serial.println("==========================================");
+  Serial.println("✅ System initialized");
+  Serial.println("🚪 Gate Status: OPEN");
+  
+
+  
+  delay(2000);  // Short delay for IR sensor
+  
+  Serial.println("...WAITING FOR TRAIN VIBRATION...\n");
+}
+
+void loop() {
+  int sensorValue = analogRead(PIEZO_PIN);
+  int delta = abs(sensorValue - lastSensorValue);
+  lastSensorValue = sensorValue;
+  switch (currentState) {
+    case WAITING_FOR_TRAIN: {
+      static unsigned long lastDebug = 0;
+      if (millis() - lastDebug > 100) {
+        
+        if (delta > SPIKE_THRESHOLD) {
+          spikeCount++;
+        } else {
+          if (spikeCount > 0) spikeCount--;
+        }
+        
+        if (DEBUG_MODE && (millis() % 1000 < 100)) {
+          Serial.print(" Piezo: ");
+          Serial.print(sensorValue);
+          Serial.print(" | Delta: ");
+          Serial.print(delta);
+          Serial.print(" | Spikes: ");
+          Serial.print(spikeCount);
+          Serial.print("/");
+          Serial.print(MIN_SPIKE_COUNT);
+          
+          if (spikeCount >= MIN_SPIKE_COUNT) {
+            Serial.print("!SUSTAINED VIBRATION!");
+          }
+          Serial.println();
+        }
+        lastDebug = millis();
+      }
+
+      if (spikeCount >= MIN_SPIKE_COUNT && sensorValue > VIB_THRESHOLD) {
+        currentState = BUZZER_ACTIVE;
+        buzzStartTime = millis();
+        spikeCount = 0;
+        
+        Serial.println("\n================================");
+        Serial.println("!!!   TRAIN VIBRATION DETECTED   !!!");
+        Serial.println("================================");
+        Serial.println("Buzzer: !  ALARM ON FOR CLEARING TRACK  ! ");
+        Serial.print(" Sensor: ");
+        Serial.print(sensorValue);
+        Serial.print(" | Delta: ");
+        Serial.println(delta);
+        Serial.println();
+      }
+      break;
+    }
+
+    case BUZZER_ACTIVE: {
+      unsigned long elapsed = millis() - buzzStartTime;
+      
+      static unsigned long lastToneSwitch = 0;
+      static bool highTone = true;
+      
+      if (millis() - lastToneSwitch > 200) {
+        if (highTone) {
+          tone(BUZZER_PIN, BUZZ_FREQ + 500);
+        } else {
+          tone(BUZZER_PIN, BUZZ_FREQ);
+        }
+        highTone = !highTone;
+        lastToneSwitch = millis();
+      }
+      
+      static unsigned long lastCount = 0;
+      if (millis() - lastCount > 1000) {
+        float remaining = (BUZZ_DURATION - elapsed) / 1000.0;
+        Serial.print("ALARM: ");
+        Serial.print(remaining, 1);
+        Serial.println("seconds remaining");
+        lastCount = millis();
+      }
+      
+      if (elapsed >= BUZZ_DURATION) {
+        noTone(BUZZER_PIN);
+        digitalWrite(BUZZER_PIN, LOW);
+        
+        Serial.println("\n Alarm: OFF");
+        Serial.println("!!..Closing gate..!!");
+        
+        gateServo.write(SERVO_CLOSE_ANGLE);
+        delay(1500);
+        
+        currentState = GATE_CLOSED;
+        
+        Serial.println("Gate--> !!!CLOSED!!!");
+        Serial.println("!!!...CHECKING MOVEMENT OF TRAIN...!!!\n");
+      }
+      break;
+    }
+    //
+    case GATE_CLOSED: {
+      int irState = digitalRead(IR_PIN);  // LOW = object detected, HIGH = clear
+
+      static unsigned long lastStableTime = 0;
+      static bool stableLow = false;
+      static bool lastIRState = HIGH;
+      static unsigned long lastPrint = 0;
+
+      if (irState != lastIRState) {
+        lastStableTime = millis();
+        lastIRState = irState;
+      }
+      //
+      if (irState == LOW && (millis() - lastStableTime > 200)) {
+        if (!stableLow) {
+          stableLow = true;
+          tone(BUZZER_PIN, 4000, 150);
+          Serial.println("TRAIN detected by IR sensor!");
+          currentState = WAITING_FOR_NO_TRAIN;
+        }
+      } else if (irState == HIGH) {
+        stableLow = false;
+      }
+      if (millis() - lastPrint > 300) {
+        Serial.print(" IR reading: ");
+        Serial.println(irState == LOW ? "🔴 TRAIN DETECTED" : "🟢 CLEAR( NO TRAIN )");
+        lastPrint = millis();
+      }
+      break;
+    }
+    //
+    case WAITING_FOR_NO_TRAIN: {
+      int irState = digitalRead(IR_PIN);  // LOW = object, HIGH = clear
+      static unsigned long lastStableHigh = 0;
+      static bool highStable = false;
+      static unsigned long lastPrint = 0;
+
+      if (irState == HIGH) {  // Changed: HIGH means object removed
+        if (!highStable) {
+          lastStableHigh = millis();
+          highStable = true; 
+
+
+
+        } else if (millis() - lastStableHigh > 800) {
+          tone(BUZZER_PIN, 4500, 150);
+          delay(200);
+          tone(BUZZER_PIN, 5000, 150);
+          delay(200);
+          Serial.println("\n opening gate...");
+          gateServo.write(SERVO_OPEN_ANGLE);
+          delay(1500);
+          Serial.println(" Gate: OPEN\n");
+          currentState = WAITING_FOR_TRAIN;
+        }
+      } else {
+        highStable = false;
+      }
+      if (millis() - lastPrint > 300) {
+        Serial.print(" IR: ");
+        Serial.println(irState == LOW ? "🔴  TRAIN DETECTED " : "🟢 CLEAR( NO TRAIN )");
+        lastPrint = millis();
+      }
+      break;
+    }
+    case GATE_OPENING:
+      break;
+  }
+  delay(20);
+}
